@@ -8,6 +8,9 @@ from bs4 import BeautifulSoup
 from pprint import pprint
 from markdownify import markdownify
 from html import unescape
+import requests
+from requests.structures import CaseInsensitiveDict
+import json
 
 ################# CONF #######################################################################################
 JIRA_RSS_EXPORT_FILE = "./import2.xml"
@@ -84,10 +87,6 @@ def parseJiraDump():
 
 
 def insert(issue):
-    import requests
-    from requests.structures import CaseInsensitiveDict
-    import json
-
     url = "https://" + SPACES_URL + "/api/http/projects/id:" + SPACES_PROJECT_ID + "/planning/issues"
     headers = CaseInsensitiveDict()
     headers["Accept"] = "application/json"
