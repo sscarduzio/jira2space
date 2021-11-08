@@ -11,35 +11,56 @@ from html import unescape
 import requests
 from requests.structures import CaseInsensitiveDict
 import json
+import re
+from datetime import datetime
 
-################# CONF #######################################################################################
-JIRA_RSS_EXPORT_FILE = "./import2.xml"
+################# CONFIGURATION ################################################################################
+JIRA_RSS_EXPORT_FILE = "./done_tasks.xml"
 SPACES_URL = "beshu.jetbrains.space"
-DEFAULT_SPACES_ISSUE_STATUS_ID = "4D8I5A3s5JqE"
 SPACES_PROJECT_ID = "23tkZF01SLKP"  # pick this up from API playground prepopulated values (see below URL)
-API_AUTH_TOKEN = ""  # take a temporary token from example code in https://beshu.jetbrains.space/httpApiPlayground?resource=projects_xxx_planning_issues&endpoint=http_post_import
+API_AUTH_TOKEN = "eyJhbGciOiJSUzUxMiJ9.eyJzdWIiOiIyOFBjZkcwZm00S2siLCJhdWQiOiJjaXJjbGV0LXdlYi11aSIsIm9yZ0RvbWFpbiI6ImJlc2h1Iiwic2NvcGUiOiIqKiIsIm5hbWUiOiJzc2NhcmR1emlvIiwiaXNzIjoiaHR0cHM6XC9cL2Jlc2h1LmpldGJyYWlucy5zcGFjZSIsInByaW5jaXBhbF90eXBlIjoiVVNFUiIsImV4cCI6MTYzNjM1OTU0MCwiaWF0IjoxNjM2MzU4OTQwLCJzaWQiOiI0T2xrV0E0Rlp0VnUifQ.OYu7PZSYv_2UiOy4tlZlgeLPdOdBYy-fVKjaQrrhWaUBPMofN_sJZn6jlwDU-igWYBpJ05h37XZ_rvnGHAWpcG9N-eGebMptC6XegZZlc7nF1SSZtuhbqjRTCRyMY865Jc1GjGWNiz0RYjlsz94-Xr1c0oJcQnuDFpOeA4ZS2cE"  # take a temporary token from example code in https://beshu.jetbrains.space/httpApiPlayground?resource=projects_xxx_planning_issues&endpoint=http_post_import
 
+JIRA_STATUS_TO_SPACE_STATUS_ID = {
+    # grep "<status"  all_tasks.xml | grep -vi done | grep -v "&lt"| sed -e 's/<[^>]*>//g' | sort | uniq
+    "To Do": "3mLmz93RuAl9",  # Open
+    "Done": "16PG4L15G4L9",
+    "In Progress": "4D8I5A3s5JqE",
+    "ON HOLD": "4dOimM2cKncz",
+    "REJECTED": "16PG4L15G4L9"
+}
 
-# Edit these two lookup table functions based on eyeballing the xml file from Jira:
-def jira_id_to_full_name(userID):
-    if userID == "60b017cc0536cb0069b9c0a8" or userID == "557058:49e1100b-7c6e-44ab-9058-377da844b8b9":
-        return "Simone Scarduzio"
-
-    return "UNKNOWN_JIRA_COMMENTER"
-
-
-def jira_label_to_space_tag_ID(tag):
-    if tag == "ror_es":
-        return "20vaFW1wT1mm"
-    if tag == "NP":
-        return "vCDCh0lyLzc"
-    if tag == "Portal":
-        return "Jil1r1Yt110"
-    if tag == "kibana":
-        return "2Fndl91iVhfT"
+JIRA_LABEL_TO_SPACE_TAG_ID = {
+    "ror_es": "20vaFW1wT1mm",
+    "NP": "vCDCh0lyLzc",
+    "Portal": "Jil1r1Yt110",
+    "kibana": "2Fndl91iVhfT"
+}
 
 
 ##############################################################################################################
+
+
+def jiraStatus2spaceStatusId(jiraStatus):
+    spaceID = JIRA_STATUS_TO_SPACE_STATUS_ID[jiraStatus]
+    if not spaceID:
+        raise Exception("Jira status unknown, please find out what it is and add it to configuration " + jiraStatus)
+    return spaceID
+
+
+def jira_label_to_space_tag_ID(label):
+    tag = JIRA_LABEL_TO_SPACE_TAG_ID[label]
+    if not tag:
+        raise Exception("Jira label " + label + " not found. Please find out what it is and add it to configuration ")
+    return tag
+
+
+def jira_user_id_to_username(jira_user_id, jiraId2usernameMap):
+    username = jiraId2usernameMap[jira_user_id]
+    if not username:
+        raise Exception(
+            "Jira label " + username + " not found. Please find out what it is and add it to configuration ")
+    return username
+
 
 def labels2tags(labels):
     result = []
@@ -54,36 +75,35 @@ def labels2tags(labels):
     return result
 
 
-def parseJiraDump():
-    issues = []
-    with open(JIRA_RSS_EXPORT_FILE) as fp:
-        doc = BeautifulSoup(fp, 'html.parser')
+def parseJiraDump(doc, jiraId2usernameMap):
+    _issues = []
+    for e in doc.rss.channel.findAll("item"):
+        print("< Processing Jira issue: " + e.title.text)
+        entry = {
+            "title": e.title.text,
+            "status": e.status.text,
+            "tag": labels2tags(e.labels),
+            "description": markdownify(unescape(str(e.description)))
+        }
+        _comments = []
 
-        for i in doc.rss.channel.findAll("item"):
-            entry = {}
-            print("==============================")
-            entry["title"] = i.title.text
-            entry["status"] = i.status.text
-            entry["tag"] = labels2tags(i.labels)
-            entry["description"] = markdownify(unescape(str(i.description)))
-            commentz = []
+        for c in (e.comments or []):
+            if c:
+                try:
+                    if len(str(c)) > 1:
+                        _comments.append({
+                            'author': jira_user_id_to_username(c.attrs["author"], jiraId2usernameMap),
+                            'created_at': c.attrs["created"],
+                            'body': markdownify(unescape(str(c)))
+                        })
+                except Exception as exc:
+                    print("oops")
+                    pprint(exc)
+                    raise exc
 
-            for c in (i.comments or []):
-                if c:
-                    try:
-                        if len(str(c)) > 1:
-                            commentz.append({
-                                'author': jira_id_to_full_name(c.attrs["author"]),
-                                'created_at': c.attrs["created"],
-                                'body': markdownify(unescape(str(c)))
-                            })
-                    except Exception as e:
-                        print("oops")
-                        pprint(e)
-
-            entry["comments"] = commentz
-            issues.append(entry)
-    return issues
+        entry["comments"] = _comments
+        _issues.append(entry)
+    return _issues
 
 
 def insert(issue):
@@ -98,21 +118,44 @@ def insert(issue):
     if len(issue["comments"]) > 0:
         descAndComments += "\n\n # Comments from Jira\n"
         for c in issue["comments"]:
-            descAndComments += "\n--- \n\n### " + c["author"] + "\n __On " + c["created_at"] + "__\n" + c['body']
-
+            try:
+                creationTime = datetime.strptime(c["created_at"], "%a, %d %b %Y %H:%M:%S %z").strftime(
+                    "%-I%p, %d %b, %Y")
+                descAndComments += "\n--- \n\n" + c['body'] + "\n\n > " + creationTime + ", " + c["author"]
+            except Exception as e:
+                pprint(e)
+                raise e
     data = json.dumps({
         "title": issue["title"],
         "description": descAndComments,
-        "status": DEFAULT_SPACES_ISSUE_STATUS_ID,  # issue["status"],
+        "status": jiraStatus2spaceStatusId(issue["status"]),
         "tags": issue["tag"],
 
     })
+    print("> Saving issue to Jetbrains Space " + issue["title"])
+    pprint(data)
     resp = requests.post(url, headers=headers, data=data)
     print(resp.status_code)
 
 
+def scanForJiraUsers(doc):
+    tags = doc.findAll(attrs={"accountid": re.compile(r".*")})
+    id2usernameMap = {}
+    for t in tags:
+        _id = t.attrs['accountid']
+        _name = t.text
+        if _id and _name:
+            id2usernameMap[_id] = _name
+        else:
+            print("faulty id tag " + str(t))
+
+    return id2usernameMap
+
+
 if __name__ == '__main__':
-    issues = parseJiraDump()
-    pprint(issues)
+    with open(JIRA_RSS_EXPORT_FILE) as fp:
+        doc = BeautifulSoup(fp, 'html.parser')
+    jiraId2usernameMap = scanForJiraUsers(doc)
+    issues = parseJiraDump(doc, jiraId2usernameMap)
     for i in issues:
         insert(i)
